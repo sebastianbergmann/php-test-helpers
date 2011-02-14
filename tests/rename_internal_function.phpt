@@ -4,8 +4,6 @@ rename_function() and internal functions
 <?php 
 if (!extension_loaded('test_helpers')) die('skip test_helpers extension not loaded');
 ?>
---XFAIL--
-Not yet implemented
 --FILE--
 <?php
 $headers = array();
