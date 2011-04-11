@@ -281,10 +281,6 @@ static int pth_exit_handler(ZEND_OPCODE_HANDLER_ARGS) /* {{{ */
 
 static void php_test_helpers_init_globals(zend_test_helpers_globals *globals) /* {{{ */
 {
-	ALLOC_HASHTABLE(globals->modified_internal_functions);
-    zend_hash_init(THG(modified_internal_functions), 0, NULL, ZEND_FUNCTION_DTOR, 0);
-
-    
 	globals->new_handler.fci.function_name = NULL;
 	globals->exit_handler.fci.function_name = NULL;
 	
@@ -293,6 +289,8 @@ static void php_test_helpers_init_globals(zend_test_helpers_globals *globals) /*
 	globals->exit_handler.fci.object_ptr = NULL;
 #endif
 
+	ALLOC_HASHTABLE(globals->modified_internal_functions);
+	zend_hash_init(globals->modified_internal_functions, 0, NULL, ZEND_FUNCTION_DTOR, 0);
 }
 /* }}} */
 
@@ -312,12 +310,13 @@ static PHP_MINIT_FUNCTION(test_helpers)
 
 	old_exit_handler = zend_get_user_opcode_handler(ZEND_EXIT);
 	zend_set_user_opcode_handler(ZEND_EXIT, pth_exit_handler);
-
+	
 	test_helpers_module_initialized = 1;
 
 	return SUCCESS;
 }
 /* }}} */
+
 
 /* {{{ PHP_RSHUTDOWN_FUNCTION
  */
@@ -326,9 +325,9 @@ static PHP_RSHUTDOWN_FUNCTION(test_helpers)
 	test_helpers_free_handler(&THG(new_handler).fci TSRMLS_CC);
 	test_helpers_free_handler(&THG(exit_handler).fci TSRMLS_CC);
 
-    zend_hash_destroy(THG(modified_internal_functions));
-    FREE_HASHTABLE(THG(modified_internal_functions));
-    
+    zend_hash_destroy(&THG(modified_internal_functions));
+	FREE_HASHTABLE(&THG(modified_internal_functions));
+	
 	return SUCCESS;
 }
 /* }}} */
@@ -440,6 +439,7 @@ static int pth_rename_function(HashTable *table, char *orig, int orig_len, char 
 		if (zend_hash_add(THG(modified_internal_functions), orig, orig_len+1, func, sizeof(zend_function), NULL) == FAILURE)
 		{
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "%s() failed to insert %s into modified_internal_functions", get_active_function_name(TSRMLS_C), new);
+			return FAILURE;
 		} 
 	}
 
@@ -470,32 +470,27 @@ static int pth_rename_function(HashTable *table, char *orig, int orig_len, char 
 }
 /* }}} */
 
-/* {{{ proto void restore_internal_functions()
-    Take all the internal functions that have been modified and restore them to their
-    original implementations. */
-    
-static PHP_FUNCTION(restore_internal_functions)
+
+static int pth_restore_internal_functions()
 {
 	HashPosition pointer;
 	void **data;
 	zend_function *internal_function_override;
-	char *function_name;
-	int function_name_len;
-
+	
 	for(zend_hash_internal_pointer_reset_ex(THG(modified_internal_functions), &pointer); 
 		zend_hash_get_current_data_ex(THG(modified_internal_functions), (void**) &data, &pointer) == SUCCESS; 
 		zend_hash_move_forward_ex(THG(modified_internal_functions), &pointer)) 
 	{
 		zend_function *original_func = (zend_function *) data;
 		char *key;
-		int key_len;
-		long index;
+		uint key_len;
+		ulong index;
 
 		if (zend_hash_get_current_key_ex(THG(modified_internal_functions), &key, &key_len, &index, 0, &pointer) == HASH_KEY_IS_STRING)
 		{
-			// Lets see if there is a function currently taking the internal function's 
-			// spot. The override function will be removed from the runtime completely as
-			// we wouldn't know what to name it.
+			/* Lets see if there is a function currently taking the internal function's 
+			   spot. The override function will be removed from the runtime completely as
+			   we wouldn't know what to name it. */
 			if (zend_hash_find(EG(function_table), key, key_len, (void **) &internal_function_override) != FAILURE)
 			{
 				zend_hash_del(EG(function_table), key, key_len);
@@ -506,16 +501,37 @@ static PHP_FUNCTION(restore_internal_functions)
 			if (zend_hash_add(EG(function_table), key, key_len, (void**) original_func, sizeof(zend_function), NULL) == FAILURE)
 			{
 				php_error_docref(NULL TSRMLS_CC, E_WARNING, "%s() failed to restore %s into EG(function_table)", get_active_function_name(TSRMLS_C), key);
+				return FAILURE;
 			}
 			
 			// All done, cleanup
 			if (zend_hash_del(THG(modified_internal_functions), key, key_len) == FAILURE)
 			{
 				php_error_docref(NULL TSRMLS_CC, E_WARNING, "%s() failed to remove %s from THG(modified_internal_functions)", get_active_function_name(TSRMLS_C), key);
+				return FAILURE;
 			}
 		}
 	}
+	
+	return SUCCESS;
+
 }
+
+/* {{{ proto void restore_internal_functions()
+    Take all the internal functions that have been modified and restore them to their
+    original implementations. */
+    
+static PHP_FUNCTION(restore_internal_functions)
+{
+	int success;
+	
+	success = pth_restore_internal_functions();
+	
+	if (success == FAILURE)
+		php_error_docref(NULL TSRMLS_CC, E_ERROR, "%s() was unable to restore (all) renamed functions.", get_active_function_name(TSRMLS_C));
+}
+/* }}} */
+
 /* {{{ proto bool rename_function(string orig_func_name, string new_func_name)
    Rename a function from its original to a new name. This is mainly useful in
    unittest to stub out untested functions */
