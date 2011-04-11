@@ -325,7 +325,7 @@ static PHP_RSHUTDOWN_FUNCTION(test_helpers)
 	test_helpers_free_handler(&THG(new_handler).fci TSRMLS_CC);
 	test_helpers_free_handler(&THG(exit_handler).fci TSRMLS_CC);
 
-    zend_hash_destroy(&THG(modified_internal_functions));
+	zend_hash_destroy(&THG(modified_internal_functions));
 	FREE_HASHTABLE(&THG(modified_internal_functions));
 	
 	return SUCCESS;
