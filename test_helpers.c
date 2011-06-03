@@ -120,6 +120,10 @@ static int zend_fcall_info_argn(zend_fcall_info *fci TSRMLS_DC, int argc, ...) /
 
 static user_opcode_handler_t old_new_handler = NULL;
 static user_opcode_handler_t old_exit_handler = NULL;
+static user_opcode_handler_t old_fetch_class_handler = NULL;
+static user_opcode_handler_t old_fetch_constant_handler = NULL;
+static user_opcode_handler_t old_zend_init_static_methodcall_handler = NULL;
+
 static int test_helpers_module_initialized = 0;
 
 typedef struct {
@@ -130,6 +134,7 @@ typedef struct {
 ZEND_BEGIN_MODULE_GLOBALS(test_helpers)
 	user_handler_t new_handler;
 	user_handler_t exit_handler;
+	user_handler_t class_handler;
 ZEND_END_MODULE_GLOBALS(test_helpers)
 
 ZEND_DECLARE_MODULE_GLOBALS(test_helpers)
@@ -278,11 +283,117 @@ static int pth_exit_handler(ZEND_OPCODE_HANDLER_ARGS) /* {{{ */
 }
 /* }}} */
 
+int pth_determine_overloaded_classname(zval *current_classname, char **new_classname) /* {{{ */ 
+{
+	zval *result;
+	
+	if (THG(class_handler).fci.function_name == NULL) {
+		return FAILURE;
+	}
+	
+	zend_fcall_info_argn(&THG(class_handler).fci TSRMLS_CC, 1, current_classname);
+	zend_fcall_info_call(&THG(class_handler).fci, &THG(new_handler).fcc, &result, NULL TSRMLS_CC);
+	zend_fcall_info_args_clear(&THG(class_handler).fci, 1);
+
+	convert_to_string_ex(&result);
+	
+	*new_classname = estrndup(Z_STRVAL_P(result), Z_STRLEN_P(result));
+	zval_ptr_dtor(&result);
+	
+	return SUCCESS;
+} /* }}} */
+
+static int pth_overload_class_handler(ZEND_OPCODE_HANDLER_ARGS) /* {{{ */
+{
+	zval *freeop, *result;
+	zval *class_name;
+	zval *op_val; 
+	znode *classname_op;
+	
+	bool have_handler = (THG(class_handler).fci.function_name != NULL);
+	
+	switch (EX(opline)->opcode)
+	{
+		case ZEND_FETCH_CLASS:
+			if (!have_handler)
+			{
+				if (old_fetch_class_handler)
+					return old_fetch_class_handler(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
+				else
+					return ZEND_USER_OPCODE_DISPATCH;
+			}
+			
+			classname_op = &EX(opline)->op2;
+			op_val = &EX(opline)->op2.u.constant;
+			break;
+		
+		case ZEND_FETCH_CONSTANT:		
+			if (!have_handler)
+			{
+				if (old_fetch_constant_handler)
+					return old_fetch_constant_handler(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
+				else
+					return ZEND_USER_OPCODE_DISPATCH;
+			}
+			/* Intentional fall through */
+		case ZEND_INIT_STATIC_METHOD_CALL:
+			if (!have_handler)
+			{
+				if (old_zend_init_static_methodcall_handler)
+					return old_zend_init_static_methodcall_handler(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
+				else
+					return ZEND_USER_OPCODE_DISPATCH;
+			}
+		
+			classname_op = &EX(opline)->op1;
+			op_val = &EX(opline)->op1.u.constant;	
+			break;
+		
+		default:
+			return ZEND_USER_OPCODE_DISPATCH;
+	}
+	
+	class_name = pth_get_zval_ptr(classname_op, &freeop, execute_data TSRMLS_CC);
+	
+	/* Not sure if this is the right approach, but this happens when you call this:
+	 *
+	 *  $x = 'MyClass';
+	 *  echo $x::MY_CONSTANT;
+	 *
+	 * Here, a ZEND_FETCH_CLASS opline is executed for $x, making the first op for the FETCH_CONSTANT opline
+	 * to be an IS_VAR with - i think - a zend_class_entry instead of the classname - something
+	 * pth_get_zval_ptr isn't capable of dealing with. However, since the overload is already satisfied
+	 * by the ZEND_FETCH_CLASS opline, not dealing with the FETCH_CONSTANT (by dispatching) seems
+	 * good enough.
+	 */
+	if (class_name == NULL)
+		return ZEND_USER_OPCODE_DISPATCH;
+	
+	char *new_classname;
+	if (pth_determine_overloaded_classname(class_name, &new_classname) == SUCCESS)
+	{		
+		if (classname_op->op_type == IS_CONST)
+			efree(op_val->value.str.val);
+			
+		classname_op->op_type = IS_CONST;
+		ZVAL_STRINGL(op_val, new_classname, strlen(new_classname),  true);
+		efree(new_classname);
+	}
+	else
+	{
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Could not determine overload class for \"%s\"", Z_STRVAL_P(class_name));
+	}
+	
+	return ZEND_USER_OPCODE_DISPATCH;
+} /* }}} */
+
 static void php_test_helpers_init_globals(zend_test_helpers_globals *globals) /* {{{ */
 {
+	globals->class_handler.fci.function_name = NULL;
 	globals->new_handler.fci.function_name = NULL;
 	globals->exit_handler.fci.function_name = NULL;
 #if PHP_VERSION_ID >= 50300
+	globals->class_handler.fci.object_ptr = NULL;
 	globals->new_handler.fci.object_ptr = NULL;
 	globals->exit_handler.fci.object_ptr = NULL;
 #endif
@@ -306,6 +417,15 @@ static PHP_MINIT_FUNCTION(test_helpers)
 	old_exit_handler = zend_get_user_opcode_handler(ZEND_EXIT);
 	zend_set_user_opcode_handler(ZEND_EXIT, pth_exit_handler);
 
+	old_fetch_class_handler = zend_get_user_opcode_handler(ZEND_FETCH_CLASS);
+	zend_set_user_opcode_handler(ZEND_FETCH_CLASS, pth_overload_class_handler);
+	
+	old_fetch_constant_handler = zend_get_user_opcode_handler(ZEND_FETCH_CONSTANT);
+	zend_set_user_opcode_handler(ZEND_FETCH_CONSTANT, pth_overload_class_handler);
+	
+	old_zend_init_static_methodcall_handler = zend_get_user_opcode_handler(ZEND_INIT_STATIC_METHOD_CALL);
+	zend_set_user_opcode_handler(ZEND_INIT_STATIC_METHOD_CALL, pth_overload_class_handler);
+	
 	test_helpers_module_initialized = 1;
 
 	return SUCCESS;
@@ -316,6 +436,7 @@ static PHP_MINIT_FUNCTION(test_helpers)
  */
 static PHP_RSHUTDOWN_FUNCTION(test_helpers)
 {
+	test_helpers_free_handler(&THG(class_handler).fci TSRMLS_CC);
 	test_helpers_free_handler(&THG(new_handler).fci TSRMLS_CC);
 	test_helpers_free_handler(&THG(exit_handler).fci TSRMLS_CC);
 	return SUCCESS;
@@ -378,6 +499,15 @@ static PHP_FUNCTION(set_new_overload)
 }
 /* }}} */
 
+/* {{{ proto bool set_class_overload(callback cb)
+   Register a callback, called when looking up a class */
+static PHP_FUNCTION(set_class_overload)
+{
+	overload_helper(pth_overload_class_handler, ZEND_FETCH_CLASS, &THG(class_handler), INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+
+/* }}} */
+
 /* {{{ proto bool set_exit_overload(callback cb)
    Register a callback, called on exit()/die() */
 static PHP_FUNCTION(set_exit_overload)
@@ -394,6 +524,14 @@ static void unset_overload_helper(user_handler_t *handler, INTERNAL_FUNCTION_PAR
 
 	test_helpers_free_handler(&handler->fci TSRMLS_CC);
 	RETURN_TRUE;
+}
+/* }}} */
+
+/* {{{ proto bool unset_class_overload() 
+   Remove the current class handler */
+static PHP_FUNCTION(unset_class_overload)
+{
+	unset_overload_helper(&THG(class_handler), INTERNAL_FUNCTION_PARAM_PASSTHRU);
 }
 /* }}} */
 
@@ -492,6 +630,11 @@ ZEND_BEGIN_ARG_INFO(arginfo_unset_new_overload, 0)
 ZEND_END_ARG_INFO()
 /* }}} */
 
+/* {{{ unset_class_overload */
+ZEND_BEGIN_ARG_INFO(arginfo_unset_class_overload, 0)
+ZEND_END_ARG_INFO()
+/* }}} */
+
 /* {{{ unset_exit_overload */
 ZEND_BEGIN_ARG_INFO(arginfo_unset_exit_overload, 0)
 ZEND_END_ARG_INFO()
@@ -499,6 +642,12 @@ ZEND_END_ARG_INFO()
 
 /* {{{ set_new_overload */
 ZEND_BEGIN_ARG_INFO(arginfo_set_new_overload, 0)
+	ZEND_ARG_INFO(0, callback)
+ZEND_END_ARG_INFO()
+/* }}} */
+
+/* {{{ set_class_overload */
+ZEND_BEGIN_ARG_INFO(arginfo_set_class_overload, 0)
 	ZEND_ARG_INFO(0, callback)
 ZEND_END_ARG_INFO()
 /* }}} */
@@ -521,6 +670,8 @@ ZEND_END_ARG_INFO()
 /* {{{ test_helpers_functions[]
  */
 static const zend_function_entry test_helpers_functions[] = {
+	PHP_FE(unset_class_overload, arginfo_unset_class_overload)
+	PHP_FE(set_class_overload, arginfo_set_class_overload)
 	PHP_FE(unset_new_overload, arginfo_unset_new_overload)
 	PHP_FE(set_new_overload, arginfo_set_new_overload)
 	PHP_FE(unset_exit_overload, arginfo_unset_exit_overload)
@@ -560,7 +711,7 @@ ZEND_EXTENSION();
 zend_extension zend_extension_entry = {
 	"test_helpers",
 	TEST_HELPERS_VERSION,
-	"Johannes Schlueter, Scott MacVicar, Sebastian Bergmann",
+	"Johannes Schlueter, Scott MacVicar, Sebastian Bergmann, Mathieu Kooiman",
 	"http://github.com/johannes/php-test-helpers",
 	"Copyright (c) 2009-2011",
 	test_helpers_zend_startup,
