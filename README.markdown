@@ -14,7 +14,7 @@ The PEAR channel (`pear.phpunit.de`) that is used to distribute `ext/test_helper
 
 This has to be done only once. Now the PEAR Installer can be used to install extensions and packages from the PHPUnit channel:
 
-    sb@ubuntu ~ % pecl install phpunit/test_helpers
+    sb@ubuntu ~ % pecl install pear.phpunit.de/test_helpers
     downloading test_helpers-1.0.0.tgz ...
     Starting to download test_helpers-1.0.0.tgz (6,980 bytes)
     .....done: 6,980 bytes
