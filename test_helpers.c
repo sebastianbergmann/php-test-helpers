@@ -60,6 +60,19 @@
 #   define PHP_TEST_HELPERS_API
 #endif
 
+# define ZEND_USER_OPCODE_HANDLER_ARGS zend_execute_data *execute_data
+# define ZEND_USER_OPCODE_HANDLER_ARGS_PASSTHRU execute_data
+
+#define ZEND_VM_CONTINUE()         return 0
+
+#define ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION() \
+	opline = EX(opline) + 1; \
+	ZEND_VM_CONTINUE()
+
+#define HANDLE_EXCEPTION() \
+	EX(opline) = opline; \
+	ZEND_VM_CONTINUE()
+
 static user_opcode_handler_t old_new_handler = NULL;
 static user_opcode_handler_t old_exit_handler = NULL;
 static int test_helpers_module_initialized = 0;
@@ -94,14 +107,10 @@ static int pth_new_handler(ZEND_OPCODE_HANDLER_ARGS) /* {{{ */
 	zend_execute_data *execute_data = EG(current_execute_data);
 	const zend_op *opline = execute_data->opline;
 
-
-
 	if (Z_TYPE(THG(new_handler).fci.function_name) == IS_UNDEF) {
-		/* TODO Sean-Der
 		if (old_new_handler) {
-			return old_new_handler(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
+			return old_new_handler(ZEND_USER_OPCODE_HANDLER_ARGS_PASSTHRU);
 		}
-		*/
 		return ZEND_USER_OPCODE_DISPATCH;
 	}
 	if (opline->op1_type == IS_CONST) {
@@ -109,15 +118,13 @@ static int pth_new_handler(ZEND_OPCODE_HANDLER_ARGS) /* {{{ */
 		if (old_ce == NULL) {
 			old_ce = zend_fetch_class_by_name(Z_STR_P(EX_CONSTANT(opline->op1)), EX_CONSTANT(opline->op1) + 1, ZEND_FETCH_CLASS_DEFAULT | ZEND_FETCH_CLASS_EXCEPTION);
 			if (old_ce == NULL) {
-				// TODO Sean-Der
-				//ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
+				ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
 			}
 		}
 	} else if (opline->op1_type == IS_UNUSED) {
 		old_ce = zend_fetch_class(NULL, opline->op1.num);
 		if (old_ce == NULL) {
-			// TODO Sean-Der
-			//HANDLE_EXCEPTION();
+			HANDLE_EXCEPTION();
 		}
 	} else  {
 		old_ce = Z_CE_P(EX_VAR(opline->op1.var));
@@ -147,11 +154,9 @@ static int pth_new_handler(ZEND_OPCODE_HANDLER_ARGS) /* {{{ */
 
 	CACHE_PTR(Z_CACHE_SLOT_P(EX_CONSTANT(opline->op1)), new_ce);
 
-	/* TODO Sean-Der
-	   if (old_new_handler) {
-	   return old_new_handler(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
-	   }
-	*/
+	if (old_new_handler) {
+		return old_new_handler(ZEND_USER_OPCODE_HANDLER_ARGS_PASSTHRU);
+	}
 	return ZEND_USER_OPCODE_DISPATCH;
 }
 /* }}} */
@@ -166,11 +171,9 @@ static int pth_exit_handler(ZEND_OPCODE_HANDLER_ARGS) /* {{{ */
 
 
 	if (Z_TYPE(THG(exit_handler).fci.function_name) == IS_UNDEF) {
-		/* TODO Sean-Der
 		if (old_exit_handler) {
-			return old_exit_handler(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
+			return old_exit_handler(ZEND_USER_OPCODE_HANDLER_ARGS_PASSTHRU);
 		}
-		*/
 		return ZEND_USER_OPCODE_DISPATCH;
 	}
 
@@ -189,11 +192,9 @@ static int pth_exit_handler(ZEND_OPCODE_HANDLER_ARGS) /* {{{ */
 	convert_to_boolean(&retval);
 	if (Z_TYPE(retval) == IS_TRUE) {
 		zval_ptr_dtor(&retval);
-		/* TODO Sean-Der
 		if (old_exit_handler) {
-			return old_exit_handler(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
+			return old_exit_handler(ZEND_USER_OPCODE_HANDLER_ARGS_PASSTHRU);
 		}
-		*/
 		return ZEND_USER_OPCODE_DISPATCH;
 	} else {
 		zval_ptr_dtor(&retval);
