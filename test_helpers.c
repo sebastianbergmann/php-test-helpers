@@ -152,7 +152,9 @@ static int pth_new_handler(ZEND_OPCODE_HANDLER_ARGS) /* {{{ */
 	zval_ptr_dtor(&retval);
 	zend_string_release(retval_zstr);
 
-	CACHE_PTR(Z_CACHE_SLOT_P(EX_CONSTANT(opline->op1)), new_ce);
+	if (opline->op1_type == IS_CONST) {
+		CACHE_PTR(Z_CACHE_SLOT_P(EX_CONSTANT(opline->op1)), new_ce);
+	}
 
 	if (old_new_handler) {
 		return old_new_handler(ZEND_USER_OPCODE_HANDLER_ARGS_PASSTHRU);
