@@ -18,7 +18,7 @@ var_dump(get_class(new Bar));
 --EXPECTF--
 bool(true)
 
-Fatal error: Uncaught exception 'Exception' with message 'Class Foo does not exist' in %s:%d
+Fatal error: Uncaught Exception: Class Foo does not exist in %s:%d
 Stack trace:
 #0 {main}
   thrown in %s on line %d

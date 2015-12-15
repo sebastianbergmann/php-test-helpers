@@ -1,13 +1,12 @@
 --TEST--
 Loading test_helpers as zend_extension
 --INI--
-zend_extension=modules/test_helpers.so
+zend_extension=test_helpers.so
 error_log=
 display_errors=0
 --SKIPIF--
 <?php
 if (getenv('TRAVIS') !== FALSE) die("skip test doesn't work on travis.");
-if (version_compare(PHP_VERSION, '5.5', '>=')) die("skip test is for PHP < 5.5.");
 if (!extension_loaded('test_helpers')) die('skip test_helpers extension not loaded');
 if (!file_exists('modules/test_helpers.so')) die('skip test_helpers.so not found Static build? out-of-src-dir build?');
 ?>

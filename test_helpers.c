@@ -50,6 +50,7 @@
 #include "php_test_helpers.h"
 #include "Zend/zend_exceptions.h"
 #include "Zend/zend_extensions.h"
+#include "Zend/zend_compile.h"
 
 #ifdef PHP_WIN32
 #   define PHP_TEST_HELPERS_API __declspec(dllexport)
@@ -58,74 +59,6 @@
 #else
 #   define PHP_TEST_HELPERS_API
 #endif
-
-/* {{{ PHP < 5.3.0 */
-#if PHP_VERSION_ID < 50300
-typedef opcode_handler_t user_opcode_handler_t;
-
-#if (defined (__GNUC__) && __GNUC__ > 2 ) && !defined(DARWIN) && !defined(__hpux) && !defined(_AIX)
-#   define EXPECTED(condition)   __builtin_expect(condition, 1)
-#   define UNEXPECTED(condition) __builtin_expect(condition, 0)
-#else
-#   define EXPECTED(condition)   (condition)
-#   define UNEXPECTED(condition) (condition)
-#endif
-
-#define Z_ADDREF_P(z) ((z)->refcount++)
-
-#define zend_parse_parameters_none() zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "")
-
-static void zend_fcall_info_args_clear(zend_fcall_info *fci, int free_mem) /* {{{ */
-{
-    if (fci->params) {
-        if (free_mem) {
-            efree(fci->params);
-            fci->params = NULL;
-        }
-    }
-    fci->param_count = 0;
-}
-/* }}} */
-
-static int zend_fcall_info_argv(zend_fcall_info *fci TSRMLS_DC, int argc, va_list *argv) /* {{{ */
-{
-    int i;
-    zval **arg;
-
-    if (argc < 0) {
-        return FAILURE;
-    }
-
-    zend_fcall_info_args_clear(fci, !argc);
-
-    if (argc) {
-        fci->param_count = argc;
-        fci->params = (zval ***) erealloc(fci->params, fci->param_count * sizeof(zval **));
-
-        for (i = 0; i < argc; ++i) {
-            arg = va_arg(*argv, zval **);
-            fci->params[i] = arg;
-        }
-    }
-
-    return SUCCESS;
-}
-/* }}} */
-
-static int zend_fcall_info_argn(zend_fcall_info *fci TSRMLS_DC, int argc, ...) /* {{{ */
-{
-   int ret;
-   va_list argv;
-
-   va_start(argv, argc);
-   ret = zend_fcall_info_argv(fci TSRMLS_CC, argc, &argv);
-   va_end(argv);
-
-   return ret;
-}
-/* }}} */
-#endif /* PHP_VERSION_ID < 50300 */
-/* }}} */
 
 static user_opcode_handler_t old_new_handler = NULL;
 static user_opcode_handler_t old_exit_handler = NULL;
@@ -143,200 +76,130 @@ ZEND_END_MODULE_GLOBALS(test_helpers)
 
 ZEND_DECLARE_MODULE_GLOBALS(test_helpers)
 
-#ifdef ZTS
-#define THG(v) TSRMG(test_helpers_globals_id, zend_test_helpers_globals *, v)
-#else
-#define THG(v) (test_helpers_globals.v)
-#endif
-
-#undef EX
-#define EX(element) execute_data->element
-
-#if PHP_VERSION_ID >= 50500
-# define EX_T(offset) (*EX_TMP_VAR(execute_data, offset))
-#else
-# define EX_T(offset) (*(temp_variable *)((char*)execute_data->Ts + offset))
-#endif
-
-#if PHP_VERSION_ID >= 50399
-# define PTH_ZNODE znode_op
-# define PTH_TYPE(t) t##_type
-#else
-# define PTH_ZNODE znode
-# define PTH_TYPE(t) t.op_type
-#endif
-
-zval *pth_get_zval_ptr(int node_type, PTH_ZNODE *node, zval **freeval, zend_execute_data *execute_data TSRMLS_DC)
+static void test_helpers_free_handler(zend_fcall_info *fci) /* {{{ */
 {
-	*freeval = NULL;
-
-	switch (node_type) {
-		case IS_CONST:
-#if PHP_VERSION_ID >= 50399
-			return node->zv;
-#else
-			return &node->u.constant;
-#endif
-			break;
-
-		case IS_VAR:
-#if PHP_VERSION_ID >= 50399
-			if (EX_T(node->var).var.ptr) {
-				return EX_T(node->var).var.ptr;
-#else
-			if (EX_T(node->u.var).var.ptr) {
-				return EX_T(node->u.var).var.ptr;
-#endif
-			}
-			break;
-
-		case IS_TMP_VAR:
-#if PHP_VERSION_ID >= 50399
-			return (*freeval = &EX_T(node->var).tmp_var);
-#else
-			return (*freeval = &EX_T(node->u.var).tmp_var);
-#endif
-			break;
-
-		case IS_CV: {
-			zval **tmp;
-#if PHP_VERSION_ID >= 50399
-			tmp = zend_get_compiled_variable_value(execute_data, node->constant);
-#else
-			tmp = zend_get_compiled_variable_value(execute_data, node->u.constant.value.lval);
-#endif
-			if (tmp) {
-				return *tmp;
-			}
-			break;
-		}
+	ZVAL_UNDEF(&fci->function_name);
+	if (fci->object) {
+		zend_object_std_dtor(fci->object);
+		fci->object = NULL;
 	}
-
-	return NULL;
-}
-
-static void test_helpers_free_handler(zend_fcall_info *fci TSRMLS_DC) /* {{{ */
-{
-	if (fci->function_name) {
-		zval_ptr_dtor(&fci->function_name);
-		fci->function_name = NULL;
-	}
-#if PHP_VERSION_ID >= 50300
-	if (fci->object_ptr) {
-		zval_ptr_dtor(&fci->object_ptr);
-		fci->object_ptr = NULL;
-	}
-#endif
 }
 /* }}} */
 
 static int pth_new_handler(ZEND_OPCODE_HANDLER_ARGS) /* {{{ */
 {
-	zval *retval, *arg;
-	zend_op *opline = EX(opline);
-	zend_class_entry *old_ce, **new_ce;
+	zval retval, arg;
+	zend_string *retval_zstr;
+	zend_class_entry *old_ce, *new_ce;
+	zend_execute_data *execute_data = EG(current_execute_data);
+	const zend_op *opline = execute_data->opline;
 
-	if (THG(new_handler).fci.function_name == NULL) {
+
+
+	if (Z_TYPE(THG(new_handler).fci.function_name) == IS_UNDEF) {
+		/* TODO Sean-Der
 		if (old_new_handler) {
 			return old_new_handler(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
-		} else {
-			return ZEND_USER_OPCODE_DISPATCH;
 		}
+		*/
+		return ZEND_USER_OPCODE_DISPATCH;
+	}
+	if (opline->op1_type == IS_CONST) {
+		old_ce = CACHED_PTR(Z_CACHE_SLOT_P(EX_CONSTANT(opline->op1)));
+		if (old_ce == NULL) {
+			old_ce = zend_fetch_class_by_name(Z_STR_P(EX_CONSTANT(opline->op1)), EX_CONSTANT(opline->op1) + 1, ZEND_FETCH_CLASS_DEFAULT | ZEND_FETCH_CLASS_EXCEPTION);
+			if (old_ce == NULL) {
+				// TODO Sean-Der
+				//ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
+			}
+		}
+	} else if (opline->op1_type == IS_UNUSED) {
+		old_ce = zend_fetch_class(NULL, opline->op1.num);
+		if (old_ce == NULL) {
+			// TODO Sean-Der
+			//HANDLE_EXCEPTION();
+		}
+	} else  {
+		old_ce = Z_CE_P(EX_VAR(opline->op1.var));
 	}
 
-#if ZEND_EXTENSION_API_NO >= 220100525
-	old_ce = EX_T(opline->op1.var).class_entry;
-#else
-	old_ce = EX_T(opline->op1.u.var).class_entry;
-#endif
+	ZVAL_STRINGL(&arg, ZSTR_VAL(old_ce->name), ZSTR_LEN(old_ce->name));
 
-	MAKE_STD_ZVAL(arg);
-	ZVAL_STRINGL(arg, old_ce->name, old_ce->name_length, 1);
-
-	zend_fcall_info_argn(&THG(new_handler).fci TSRMLS_CC, 1, &arg);
-	zend_fcall_info_call(&THG(new_handler).fci, &THG(new_handler).fcc, &retval, NULL TSRMLS_CC);
+	zend_fcall_info_argn(&THG(new_handler).fci, 1, &arg);
+	zend_fcall_info_call(&THG(new_handler).fci, &THG(new_handler).fcc, &retval, NULL);
 	zend_fcall_info_args_clear(&THG(new_handler).fci, 1);
 
 	convert_to_string_ex(&retval);
-	if (zend_lookup_class(Z_STRVAL_P(retval), Z_STRLEN_P(retval), &new_ce TSRMLS_CC) == FAILURE) {
+	retval_zstr = zval_get_string(&retval);
+	if ((new_ce = zend_lookup_class(retval_zstr)) == NULL) {
 		if (!EG(exception)) {
-			zend_throw_exception_ex(zend_exception_get_default(TSRMLS_C), -1 TSRMLS_CC, "Class %s does not exist", Z_STRVAL_P(retval));
+			zend_throw_exception_ex(zend_exception_get_default(), -1, "Class %s does not exist", Z_STRVAL(retval));
 		}
 		zval_ptr_dtor(&arg);
 		zval_ptr_dtor(&retval);
+		zend_string_release(retval_zstr);
 
 		return ZEND_USER_OPCODE_CONTINUE;
 	}
-
 	zval_ptr_dtor(&arg);
 	zval_ptr_dtor(&retval);
+	zend_string_release(retval_zstr);
 
+	CACHE_PTR(Z_CACHE_SLOT_P(EX_CONSTANT(opline->op1)), new_ce);
 
-#if ZEND_EXTENSION_API_NO >= 220100525
-	EX_T(opline->op1.var).class_entry = *new_ce;
-#else
-	EX_T(opline->op1.u.var).class_entry = *new_ce;
-#endif
-
-	if (old_new_handler) {
-		return old_new_handler(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
-	} else {
-		return ZEND_USER_OPCODE_DISPATCH;
-	}
+	/* TODO Sean-Der
+	   if (old_new_handler) {
+	   return old_new_handler(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
+	   }
+	*/
+	return ZEND_USER_OPCODE_DISPATCH;
 }
 /* }}} */
 
 static int pth_exit_handler(ZEND_OPCODE_HANDLER_ARGS) /* {{{ */
 {
-	zval *msg, *freeop;
-	zend_op *opline = EX(opline);
-	zval *retval = NULL;
+	zval *msg = NULL;
+	zend_execute_data *execute_data = EG(current_execute_data);
+	const zend_op *opline = execute_data->opline;
+	zval retval;
+	zend_free_op free_op;
 
-	if (THG(exit_handler).fci.function_name == NULL) {
+
+	if (Z_TYPE(THG(exit_handler).fci.function_name) == IS_UNDEF) {
+		/* TODO Sean-Der
 		if (old_exit_handler) {
 			return old_exit_handler(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
-		} else {
-			return ZEND_USER_OPCODE_DISPATCH;
 		}
+		*/
+		return ZEND_USER_OPCODE_DISPATCH;
 	}
 
-	msg = pth_get_zval_ptr(opline->PTH_TYPE(op1), &opline->op1, &freeop, execute_data TSRMLS_CC);
-
-	if (msg) {
-		zend_fcall_info_argn(&THG(exit_handler).fci TSRMLS_CC, 1, &msg);
+	if ((msg = zend_get_zval_ptr(opline->op1_type, &opline->op1, execute_data, &free_op, 0)) != NULL) {
+		zend_fcall_info_argn(&THG(exit_handler).fci, 1, msg);
 	}
-	zend_fcall_info_call(&THG(exit_handler).fci, &THG(exit_handler).fcc, &retval, NULL TSRMLS_CC);
+
+	zend_fcall_info_call(&THG(exit_handler).fci, &THG(exit_handler).fcc, &retval, NULL);
 	zend_fcall_info_args_clear(&THG(exit_handler).fci, 1);
 
-	if(UNEXPECTED(retval == NULL)) {
+	if(UNEXPECTED(Z_TYPE(retval) == IS_UNDEF)) {
 		EX(opline)++;
 		return ZEND_USER_OPCODE_CONTINUE;
 	}
 
-	convert_to_boolean(retval);
-	if (Z_LVAL_P(retval)) {
+	convert_to_boolean(&retval);
+	if (Z_TYPE(retval) == IS_TRUE) {
 		zval_ptr_dtor(&retval);
+		/* TODO Sean-Der
 		if (old_exit_handler) {
 			return old_exit_handler(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
-		} else {
-			return ZEND_USER_OPCODE_DISPATCH;
 		}
+		*/
+		return ZEND_USER_OPCODE_DISPATCH;
 	} else {
 		zval_ptr_dtor(&retval);
 		EX(opline)++;
 		return ZEND_USER_OPCODE_CONTINUE;
 	}
-}
-/* }}} */
-
-static void php_test_helpers_init_globals(zend_test_helpers_globals *globals) /* {{{ */
-{
-	globals->new_handler.fci.function_name = NULL;
-	globals->exit_handler.fci.function_name = NULL;
-#if PHP_VERSION_ID >= 50300
-	globals->new_handler.fci.object_ptr = NULL;
-	globals->exit_handler.fci.object_ptr = NULL;
-#endif
 }
 /* }}} */
 
@@ -346,11 +209,10 @@ static PHP_MINIT_FUNCTION(test_helpers)
 {
 	if (test_helpers_module_initialized) {
 		/* This should never happen as it is handled by the module loader, but let's play safe */
-		php_error_docref(NULL TSRMLS_CC, E_WARNING, "test_helpers had already been initialized! Either load it as regular PHP extension or zend_extension");
+		php_error_docref(NULL, E_WARNING, "test_helpers had already been initialized! Either load it as regular PHP extension or zend_extension");
 		return FAILURE;
 	}
 
-	ZEND_INIT_MODULE_GLOBALS(test_helpers, php_test_helpers_init_globals, NULL);
 	old_new_handler = zend_get_user_opcode_handler(ZEND_NEW);
 	zend_set_user_opcode_handler(ZEND_NEW, pth_new_handler);
 
@@ -367,8 +229,8 @@ static PHP_MINIT_FUNCTION(test_helpers)
  */
 static PHP_RSHUTDOWN_FUNCTION(test_helpers)
 {
-	test_helpers_free_handler(&THG(new_handler).fci TSRMLS_CC);
-	test_helpers_free_handler(&THG(exit_handler).fci TSRMLS_CC);
+	test_helpers_free_handler(&THG(new_handler).fci);
+	test_helpers_free_handler(&THG(exit_handler).fci);
 	return SUCCESS;
 }
 /* }}} */
@@ -398,24 +260,22 @@ static void overload_helper(user_opcode_handler_t op_handler, int opcode, user_h
 	zend_fcall_info fci;
 	zend_fcall_info_cache fcc;
 
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "f", &fci, &fcc) == FAILURE) {
+	if (zend_parse_parameters(ZEND_NUM_ARGS(), "f", &fci, &fcc) == FAILURE) {
 		return;
 	}
 
 	if (op_handler != zend_get_user_opcode_handler(opcode)) {
-		php_error_docref(NULL TSRMLS_CC, E_WARNING, "A conflicting extension was detected. Make sure to load test_helpers as zend_extension after other extensions");
+		php_error_docref(NULL, E_WARNING, "A conflicting extension was detected. Make sure to load test_helpers as zend_extension after other extensions");
 	}
 
-	test_helpers_free_handler(&handler->fci TSRMLS_CC);
+	test_helpers_free_handler(&handler->fci);
 
 	handler->fci = fci;
 	handler->fcc = fcc;
-	Z_ADDREF_P(handler->fci.function_name);
-#if PHP_VERSION_ID >= 50300
-	if (handler->fci.object_ptr) {
-		Z_ADDREF_P(handler->fci.object_ptr);
+	Z_TRY_ADDREF(handler->fci.function_name);
+	if (handler->fci.object) {
+		GC_REFCOUNT(handler->fci.object)++;
 	}
-#endif
 
 	RETURN_TRUE;
 }
@@ -443,7 +303,7 @@ static void unset_overload_helper(user_handler_t *handler, INTERNAL_FUNCTION_PAR
 		return;
 	}
 
-	test_helpers_free_handler(&handler->fci TSRMLS_CC);
+	test_helpers_free_handler(&handler->fci);
 	RETURN_TRUE;
 }
 /* }}} */
@@ -464,32 +324,32 @@ static PHP_FUNCTION(unset_exit_overload)
 }
 /* }}} */
 
-static int pth_rename_function_impl(HashTable *table, char *orig, int orig_len, char *new, int new_len TSRMLS_DC) /* {{{ */
+static int pth_rename_function_impl(HashTable *table, char *orig, int orig_len, char *new, int new_len) /* {{{ */
 {
 	zend_function *func, *dummy_func;
 
-	if (zend_hash_find(table, orig, orig_len + 1, (void **) &func) == FAILURE) {
-		php_error_docref(NULL TSRMLS_CC, E_WARNING, "%s(%s, %s) failed: %s does not exist!"			,
-						get_active_function_name(TSRMLS_C),
+	if ((func = zend_hash_str_find_ptr(table, orig, orig_len)) == NULL) {
+		php_error_docref(NULL, E_WARNING, "%s(%s, %s) failed: %s does not exist!"			,
+						get_active_function_name(),
 						orig,  new, orig);
 		return FAILURE;
 	}
 
 	/* TODO: Add infrastructure for resetting internal funcs */
 	if (func->type != ZEND_USER_FUNCTION) {
-		php_error_docref(NULL TSRMLS_CC, E_WARNING, "\"%s\" is an internal function", orig);
+		php_error_docref(NULL, E_WARNING, "\"%s\" is an internal function", orig);
 		return FAILURE;
 	}
 
-	if (zend_hash_find(table, new, new_len + 1, (void **) &dummy_func) == SUCCESS) {
-		php_error_docref(NULL TSRMLS_CC, E_WARNING, "%s(%s, %s) failed: %s already exists!"			,
-							get_active_function_name(TSRMLS_C),
+	if ((dummy_func = zend_hash_str_find_ptr(table, new, new_len)) != NULL) {
+		php_error_docref(NULL, E_WARNING, "%s(%s, %s) failed: %s already exists!"			,
+							get_active_function_name(),
 							orig,  new, new);
 		return FAILURE;
 	}
 
-	if (zend_hash_add(table, new, new_len + 1, func, sizeof(zend_function), NULL) == FAILURE) {
-		php_error_docref(NULL TSRMLS_CC, E_WARNING, "%s() failed to insert %s into EG(function_table)", get_active_function_name(TSRMLS_C), new);
+	if (zend_hash_str_add_ptr(table, new, new_len, func) == NULL) {
+		php_error_docref(NULL, E_WARNING, "%s() failed to insert %s into EG(function_table)", get_active_function_name(), new);
 		return FAILURE;
 	}
 
@@ -497,10 +357,10 @@ static int pth_rename_function_impl(HashTable *table, char *orig, int orig_len, 
 		function_add_ref(func);
 	}
 
-	if (zend_hash_del(table, orig, orig_len + 1) == FAILURE) {
-		php_error_docref(NULL TSRMLS_CC, E_WARNING, "%s() failed to remove %s from function table", get_active_function_name(TSRMLS_C), orig);
+	if (zend_hash_str_del(table, orig, orig_len) == FAILURE) {
+		php_error_docref(NULL, E_WARNING, "%s() failed to remove %s from function table", get_active_function_name(), orig);
 
-		zend_hash_del(table, new, new_len + 1);
+		zend_hash_str_del(table, new, new_len);
 		return FAILURE;
 	}
 
@@ -508,7 +368,7 @@ static int pth_rename_function_impl(HashTable *table, char *orig, int orig_len, 
 }
 /* }}} */
 
-static int pth_rename_function(HashTable *table, char *orig, int orig_len, char *new, int new_len TSRMLS_DC) /* {{{ */
+static int pth_rename_function(HashTable *table, char *orig, int orig_len, char *new, int new_len) /* {{{ */
 {
 	char *lower_orig, *lower_new;
 	int success;
@@ -516,7 +376,7 @@ static int pth_rename_function(HashTable *table, char *orig, int orig_len, char 
 	lower_orig = zend_str_tolower_dup(orig, orig_len);
 	lower_new = zend_str_tolower_dup(new, new_len);
 
-	success = pth_rename_function_impl(table, lower_orig, orig_len, lower_new, new_len TSRMLS_CC);
+	success = pth_rename_function_impl(table, lower_orig, orig_len, lower_new, new_len);
 
 	efree(lower_orig);
 	efree(lower_new);
@@ -531,13 +391,13 @@ static PHP_FUNCTION(rename_method)
 {
 	zend_class_entry *ce = NULL;
 	char *orig_fname, *new_fname;
-	int orig_fname_len, new_fname_len;
+	size_t orig_fname_len, new_fname_len;
 
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "Css", &ce, &orig_fname, &orig_fname_len, &new_fname, &new_fname_len) == FAILURE) {
+	if (zend_parse_parameters(ZEND_NUM_ARGS(), "Css", &ce, &orig_fname, &orig_fname_len, &new_fname, &new_fname_len) == FAILURE) {
 		return;
 	}
 
-	if (SUCCESS == pth_rename_function(&ce->function_table, orig_fname, orig_fname_len, new_fname, new_fname_len TSRMLS_CC)) {
+	if (SUCCESS == pth_rename_function(&ce->function_table, orig_fname, orig_fname_len, new_fname, new_fname_len)) {
 		RETURN_TRUE;
 	} else {
 		RETURN_FALSE;
@@ -551,13 +411,13 @@ static PHP_FUNCTION(rename_method)
 static PHP_FUNCTION(rename_function)
 {
 	char *orig_fname, *new_fname;
-	int orig_fname_len, new_fname_len;
+	size_t orig_fname_len, new_fname_len;
 
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "ss", &orig_fname, &orig_fname_len, &new_fname, &new_fname_len) == FAILURE) {
+	if (zend_parse_parameters(ZEND_NUM_ARGS(), "ss", &orig_fname, &orig_fname_len, &new_fname, &new_fname_len) == FAILURE) {
 		return;
 	}
 
-	if (SUCCESS == pth_rename_function(EG(function_table), orig_fname, orig_fname_len, new_fname, new_fname_len TSRMLS_CC)) {
+	if (SUCCESS == pth_rename_function(EG(function_table), orig_fname, orig_fname_len, new_fname, new_fname_len)) {
 		RETURN_TRUE;
 	} else {
 		RETURN_FALSE;

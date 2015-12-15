@@ -47,6 +47,12 @@ extern zend_module_entry test_helpers_module_entry;
 
 #define TEST_HELPERS_VERSION "1.0.1-dev"
 
+#ifdef ZTS
+#define THG(v) TSRMG(test_helpers_globals_id, zend_test_helpers_globals *, v)
+#else
+#define THG(v) (test_helpers_globals.v)
+#endif
+
 #endif	/* PHP_TEST_HELPERS_H */
 
 /*
