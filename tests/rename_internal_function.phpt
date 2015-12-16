@@ -1,11 +1,9 @@
 --TEST--
 rename_function() and internal functions
 --SKIPIF--
-<?php 
+<?php
 if (!extension_loaded('test_helpers')) die('skip test_helpers extension not loaded');
 ?>
---XFAIL--
-Not yet implemented
 --FILE--
 <?php
 $headers = array();

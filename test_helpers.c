@@ -85,6 +85,7 @@ typedef struct {
 ZEND_BEGIN_MODULE_GLOBALS(test_helpers)
 	user_handler_t new_handler;
 	user_handler_t exit_handler;
+	zend_long	   copts;
 ZEND_END_MODULE_GLOBALS(test_helpers)
 
 ZEND_DECLARE_MODULE_GLOBALS(test_helpers)
@@ -228,12 +229,58 @@ static PHP_MINIT_FUNCTION(test_helpers)
 }
 /* }}} */
 
+/* {{{ PHP_RINIT_FUNCTION
+ */
+static PHP_RINIT_FUNCTION(test_helpers)
+{
+
+	THG(copts) = CG(compiler_options);
+
+	CG(compiler_options) |= ZEND_COMPILE_HANDLE_OP_ARRAY |
+		ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION |
+		ZEND_COMPILE_IGNORE_INTERNAL_FUNCTIONS |
+		ZEND_COMPILE_IGNORE_USER_FUNCTIONS |
+		ZEND_COMPILE_GUARDS;
+
+	return SUCCESS;
+}
+/* }}} */
+
+/* {{{ */
+static inline int php_test_helpers_destroy_user_function(zval *zv) {
+    zend_function *function = Z_PTR_P(zv);
+
+    if (function->type == ZEND_USER_FUNCTION) {
+        return ZEND_HASH_APPLY_REMOVE;
+    }
+
+    return ZEND_HASH_APPLY_KEEP;
+} /* }}} */
+
+/* {{{ */
+static inline int php_test_helpers_destroy_user_functions(zval *zv) {
+    zend_class_entry *ce = Z_PTR_P(zv);
+
+    zend_hash_apply(&ce->function_table, php_test_helpers_destroy_user_function);
+
+    if (ce->type == ZEND_USER_CLASS) {
+        return ZEND_HASH_APPLY_REMOVE;
+    }
+
+    return ZEND_HASH_APPLY_KEEP;
+} /* }}} */
+
 /* {{{ PHP_RSHUTDOWN_FUNCTION
  */
 static PHP_RSHUTDOWN_FUNCTION(test_helpers)
 {
+	CG(compiler_options) = THG(copts);
+
 	test_helpers_free_handler(&THG(new_handler).fci);
 	test_helpers_free_handler(&THG(exit_handler).fci);
+
+	zend_hash_apply(CG(function_table), php_test_helpers_destroy_user_function);
+
 	return SUCCESS;
 }
 /* }}} */
@@ -327,42 +374,40 @@ static PHP_FUNCTION(unset_exit_overload)
 }
 /* }}} */
 
-static int pth_rename_function_impl(HashTable *table, char *orig, int orig_len, char *new, int new_len) /* {{{ */
+static int pth_rename_function_impl(HashTable *table, char *orig, size_t orig_len, char *new, size_t new_len) /* {{{ */
 {
-	zend_function *func, *dummy_func;
+	zend_function *func;
+	zend_internal_function *internal_tmp;
 
 	if ((func = zend_hash_str_find_ptr(table, orig, orig_len)) == NULL) {
-		php_error_docref(NULL, E_WARNING, "%s(%s, %s) failed: %s does not exist!"			,
+		php_error_docref(NULL, E_WARNING, "%s(%s, %s) failed: %s does not exist!",
 						get_active_function_name(),
 						orig,  new, orig);
 		return FAILURE;
 	}
 
-	/* TODO: Add infrastructure for resetting internal funcs */
-	if (func->type != ZEND_USER_FUNCTION) {
-		php_error_docref(NULL, E_WARNING, "\"%s\" is an internal function", orig);
-		return FAILURE;
-	}
-
-	if ((dummy_func = zend_hash_str_find_ptr(table, new, new_len)) != NULL) {
-		php_error_docref(NULL, E_WARNING, "%s(%s, %s) failed: %s already exists!"			,
+	if (zend_hash_str_exists(table, new, new_len)) {
+		php_error_docref(NULL, E_WARNING, "%s(%s, %s) failed: %s already exists!",
 							get_active_function_name(),
 							orig,  new, new);
 		return FAILURE;
 	}
 
-	if (zend_hash_str_add_ptr(table, new, new_len, func) == NULL) {
-		php_error_docref(NULL, E_WARNING, "%s() failed to insert %s into EG(function_table)", get_active_function_name(), new);
-		return FAILURE;
+	if (func->type == ZEND_INTERNAL_FUNCTION) {
+		internal_tmp = (zend_internal_function*) pemalloc(sizeof(zend_internal_function), 1);
+		memcpy(internal_tmp, func, sizeof(zend_internal_function));
+		func = (zend_function*) internal_tmp;
+	} else {
+		function_add_ref(func);
 	}
 
-	if (func->type == ZEND_USER_FUNCTION) {
-		function_add_ref(func);
+	if (zend_hash_str_add_ptr(table, new, new_len, func) == NULL) {
+		php_error_docref(NULL, E_WARNING, "%s() failed to insert %s into CG(function_table)", get_active_function_name(), new);
+		return FAILURE;
 	}
 
 	if (zend_hash_str_del(table, orig, orig_len) == FAILURE) {
 		php_error_docref(NULL, E_WARNING, "%s() failed to remove %s from function table", get_active_function_name(), orig);
-
 		zend_hash_str_del(table, new, new_len);
 		return FAILURE;
 	}
@@ -371,7 +416,7 @@ static int pth_rename_function_impl(HashTable *table, char *orig, int orig_len, 
 }
 /* }}} */
 
-static int pth_rename_function(HashTable *table, char *orig, int orig_len, char *new, int new_len) /* {{{ */
+static int pth_rename_function(HashTable *table, char *orig, size_t orig_len, char *new, size_t new_len) /* {{{ */
 {
 	char *lower_orig, *lower_new;
 	int success;
@@ -420,7 +465,7 @@ static PHP_FUNCTION(rename_function)
 		return;
 	}
 
-	if (SUCCESS == pth_rename_function(EG(function_table), orig_fname, orig_fname_len, new_fname, new_fname_len)) {
+	if (SUCCESS == pth_rename_function(CG(function_table), orig_fname, orig_fname_len, new_fname, new_fname_len)) {
 		RETURN_TRUE;
 	} else {
 		RETURN_FALSE;
@@ -489,7 +534,7 @@ zend_module_entry test_helpers_module_entry = {
 	test_helpers_functions,
 	PHP_MINIT(test_helpers),
 	NULL,
-	NULL,
+	PHP_RINIT(test_helpers),
 	PHP_RSHUTDOWN(test_helpers),
 	PHP_MINFO(test_helpers),
 	TEST_HELPERS_VERSION,
