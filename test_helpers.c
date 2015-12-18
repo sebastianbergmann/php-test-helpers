@@ -103,7 +103,6 @@ static void test_helpers_free_handler(zend_fcall_info *fci) /* {{{ */
 static int pth_new_handler(ZEND_OPCODE_HANDLER_ARGS) /* {{{ */
 {
 	zval retval, arg;
-	zend_string *retval_zstr;
 	zend_class_entry *old_ce, *new_ce;
 	zend_execute_data *execute_data = EG(current_execute_data);
 	const zend_op *opline = execute_data->opline;
@@ -138,20 +137,17 @@ static int pth_new_handler(ZEND_OPCODE_HANDLER_ARGS) /* {{{ */
 	zend_fcall_info_args_clear(&THG(new_handler).fci, 1);
 
 	convert_to_string_ex(&retval);
-	retval_zstr = zval_get_string(&retval);
-	if ((new_ce = zend_lookup_class(retval_zstr)) == NULL) {
+	if ((new_ce = zend_lookup_class(Z_STR(retval))) == NULL) {
 		if (!EG(exception)) {
 			zend_throw_exception_ex(zend_exception_get_default(), -1, "Class %s does not exist", Z_STRVAL(retval));
 		}
 		zval_ptr_dtor(&arg);
 		zval_ptr_dtor(&retval);
-		zend_string_release(retval_zstr);
 
 		return ZEND_USER_OPCODE_CONTINUE;
 	}
 	zval_ptr_dtor(&arg);
 	zval_ptr_dtor(&retval);
-	zend_string_release(retval_zstr);
 
 	if (opline->op1_type == IS_CONST) {
 		CACHE_PTR(Z_CACHE_SLOT_P(EX_CONSTANT(opline->op1)), new_ce);
@@ -433,6 +429,29 @@ static int pth_rename_function(HashTable *table, char *orig, size_t orig_len, ch
 }
 /* }}} */
 
+static int pth_redefine_constant(zend_class_entry *ce, zend_string *constant, zval *value) /* {{{ */
+{
+	zend_constant *z_const_ptr, z_const_val;
+
+	if (ce) {
+		zend_declare_class_constant(ce, ZSTR_VAL(constant), ZSTR_LEN(constant), value);
+	} else {
+		if ((z_const_ptr = zend_hash_find_ptr(EG(zend_constants), constant)) != NULL) {
+			zval_dtor(&z_const_ptr->value);
+			ZVAL_COPY(&z_const_ptr->value, value);
+		} else {
+			ZVAL_COPY(&z_const_val.value, value);
+			z_const_val.flags = CONST_CS;
+			z_const_val.name = zend_string_copy(constant);
+			z_const_val.module_number = PHP_USER_CONSTANT;
+			zend_register_constant(&z_const_val);
+		}
+
+	}
+	return SUCCESS;
+}
+/* }}} */
+
 /* {{{ proto bool rename_method(string class name, string orig_method_name, string new_method_name)
    Rename a method inside a class. The method whil remain partof the same class */
 static PHP_FUNCTION(rename_method)
@@ -473,6 +492,43 @@ static PHP_FUNCTION(rename_function)
 }
 /* }}} */
 
+/* {{{ proto bool redefine_constant(string constant, zval value)
+   Redefine a global/class constant */
+static PHP_FUNCTION(redefine_constant)
+{
+	char *constant, *colon;
+	size_t constant_len;
+	zval *value;
+	zend_class_entry *ce = NULL;
+	zend_string *class, *constant_zstr;
+
+	if (zend_parse_parameters(ZEND_NUM_ARGS(), "sz", &constant, &constant_len, &value) == FAILURE) {
+		return;
+	}
+
+	if ((colon = memchr(constant, ':', constant_len)) != NULL && colon[1] == ':') {
+		class = zend_string_init(constant, colon - constant, 0);
+		ce = zend_lookup_class(class);
+		if (ce == NULL) {
+			php_error_docref(NULL, E_WARNING, "%s(%s, ...) failed: class %s does not exist!",
+					get_active_function_name(),
+					ZSTR_VAL(class),  ZSTR_VAL(class));
+			zend_string_release(class);
+			RETURN_FALSE;
+		}
+		constant_zstr = zend_string_init(colon + 2, constant_len - (ZSTR_LEN(class) + 2), 0);
+		zend_string_release(class);
+	} else {
+		constant_zstr = zend_string_init(constant, constant_len, 0);
+	}
+
+	pth_redefine_constant(ce, constant_zstr, value);
+	zend_string_release(constant_zstr);
+	RETURN_TRUE;
+}
+/* }}} */
+
+
 /* {{{ arginfo */
 /* {{{ unset_new_overload */
 ZEND_BEGIN_ARG_INFO(arginfo_unset_new_overload, 0)
@@ -511,6 +567,11 @@ ZEND_BEGIN_ARG_INFO(arginfo_set_exit_overload, 0)
 ZEND_END_ARG_INFO()
 /* }}} */
 
+/* {{{ set_exit_overload */
+ZEND_BEGIN_ARG_INFO(arginfo_redefine_constant, 0)
+	ZEND_ARG_INFO(0, "constant")
+	ZEND_ARG_INFO(0, "value")
+ZEND_END_ARG_INFO()
 /* }}} */
 
 /* {{{ test_helpers_functions[]
@@ -522,7 +583,8 @@ static const zend_function_entry test_helpers_functions[] = {
 	PHP_FE(set_exit_overload, arginfo_set_exit_overload)
 	PHP_FE(rename_method, arginfo_rename_method)
 	PHP_FE(rename_function, arginfo_rename_function)
-	{NULL, NULL, NULL}
+	PHP_FE(redefine_constant, arginfo_redefine_constant)
+	PHP_FE_END
 };
 /* }}} */
 
