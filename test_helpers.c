@@ -151,6 +151,10 @@ static int pth_new_handler(ZEND_OPCODE_HANDLER_ARGS) /* {{{ */
 
 	if (opline->op1_type == IS_CONST) {
 		CACHE_PTR(Z_CACHE_SLOT_P(EX_CONSTANT(opline->op1)), new_ce);
+	} else if (opline->op1_type == IS_VAR) {
+		zval z_ce;
+		ZVAL_PTR(&z_ce, new_ce);
+		ZVAL_COPY(EX_VAR(opline->op1.var), &z_ce);
 	}
 
 	if (old_new_handler) {
