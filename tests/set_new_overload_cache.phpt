@@ -13,14 +13,19 @@ function returnX() {
     return new X;
 }
 
-echo get_class(returnX())  . PHP_EOL;
+echo get_class(returnX()) . ' was created' . PHP_EOL;
 set_new_overload(function($class) {
+    echo $class . ' was passed' . PHP_EOL;
     return 'Y';
 });
-echo get_class(returnX())  . PHP_EOL;
+echo get_class(returnX()) . ' was created' . PHP_EOL;
+echo get_class(returnX()) . ' was created' . PHP_EOL;
 unset_new_overload();
-echo get_class(returnX())  . PHP_EOL;
+echo get_class(returnX()) . ' was created' . PHP_EOL;
 --EXPECT--
-X
-Y
-X
+X was created
+X was passed
+Y was created
+X was passed
+Y was created
+X was created

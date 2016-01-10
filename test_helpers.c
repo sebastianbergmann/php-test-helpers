@@ -108,18 +108,20 @@ static int pth_new_handler(ZEND_OPCODE_HANDLER_ARGS) /* {{{ */
 	const zend_op *opline = execute_data->opline;
 
 	if (Z_TYPE(THG(new_handler).fci.function_name) == IS_UNDEF) {
+		if (opline->op1_type == IS_CONST) {
+			old_ce = zend_fetch_class_by_name(Z_STR_P(EX_CONSTANT(opline->op1)), EX_CONSTANT(opline->op1) + 1, ZEND_FETCH_CLASS_DEFAULT | ZEND_FETCH_CLASS_EXCEPTION);
+			CACHE_PTR(Z_CACHE_SLOT_P(EX_CONSTANT(opline->op1)), new_ce);
+		}
 		if (old_new_handler) {
 			return old_new_handler(ZEND_USER_OPCODE_HANDLER_ARGS_PASSTHRU);
 		}
 		return ZEND_USER_OPCODE_DISPATCH;
 	}
+
 	if (opline->op1_type == IS_CONST) {
-		old_ce = CACHED_PTR(Z_CACHE_SLOT_P(EX_CONSTANT(opline->op1)));
+		old_ce = zend_fetch_class_by_name(Z_STR_P(EX_CONSTANT(opline->op1)), EX_CONSTANT(opline->op1) + 1, ZEND_FETCH_CLASS_DEFAULT | ZEND_FETCH_CLASS_EXCEPTION);
 		if (old_ce == NULL) {
-			old_ce = zend_fetch_class_by_name(Z_STR_P(EX_CONSTANT(opline->op1)), EX_CONSTANT(opline->op1) + 1, ZEND_FETCH_CLASS_DEFAULT | ZEND_FETCH_CLASS_EXCEPTION);
-			if (old_ce == NULL) {
-				ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
-			}
+			ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
 		}
 	} else if (opline->op1_type == IS_UNUSED) {
 		old_ce = zend_fetch_class(NULL, opline->op1.num);
